@@ -2,6 +2,8 @@
 
 A streamlined Innovation Leaderboard application built from scratch with Flask backend and Vanilla JavaScript frontend, preserving the beautiful dark theme UI design. Now featuring AI-powered similarity analysis for better idea management.
 
+![Homepage](assets/homepage.png)
+
 ## Quick Start
 
 ### Prerequisites
