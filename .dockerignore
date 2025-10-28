@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.venv/
+venv/
+.env
+
+# Git
+.git/
+.gitignore
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local databases and caches (will be mounted as a volume at runtime)
+database/*.db
+*.sqlite3
+
+# Node/Front-end caches if any
+node_modules/
+
+# Misc
+assets/*.psd
+assets/*.ai
