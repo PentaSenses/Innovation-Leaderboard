@@ -13,7 +13,7 @@ import webbrowser
 from pathlib import Path
 
 # Configuration
-BACKEND_PORT = 5000
+BACKEND_PORT = 4444
 PROJECT_ROOT = Path(__file__).parent.parent
 
 def print_message(message):
