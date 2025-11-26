@@ -194,6 +194,16 @@
                             </div>
                         </div>
                         <button type="submit" class="btn-primary">Sign In</button>
+                        <div class="auth-divider">
+                            <span>OR</span>
+                        </div>
+                        <button type="button" class="btn-secondary btn-sso" id="azureSsoBtn">
+                            Sign in with SSO (Azure)
+                        </button>
+                        <p class="sso-hint" id="ssoConfigHint">
+                            SSO uses Azure OAuth SSO. Ensure your Azure app is configured with the correct
+                            Platform (SPA / Web / Mobile), Redirect URI, and Client Secret.
+                        </p>
                     </form>
                 </div>
                 <!-- Register Form -->

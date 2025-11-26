@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, redirect
 from flask_cors import CORS
 import sqlite3
 import bcrypt
@@ -16,6 +16,20 @@ import re
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-super-secret-jwt-key-change-this-in-production'
+
+# Azure OAuth SSO configuration
+AZURE_TENANT_ID = os.getenv('AZURE_TENANT_ID', '').strip()
+AZURE_CLIENT_ID = os.getenv('AZURE_CLIENT_ID', '').strip()
+AZURE_CLIENT_SECRET = os.getenv('AZURE_CLIENT_SECRET', '').strip()
+# This should match the redirect URI you configure in Azure (Web app)
+DEFAULT_SSO_CALLBACK = 'http://localhost:5000/api/auth/sso/callback'
+AZURE_REDIRECT_URI = os.getenv('AZURE_REDIRECT_URI', DEFAULT_SSO_CALLBACK).strip()
+# Simple flag for whether your Azure app requires a client secret
+AZURE_REQUIRE_CLIENT_SECRET = os.getenv('AZURE_REQUIRE_CLIENT_SECRET', 'true').strip().lower() == 'true'
+# Platform hint: SPA | Web | Mobile (used for UI only, backend uses Web-style server flow)
+AZURE_PLATFORM = os.getenv('AZURE_PLATFORM', 'Web').strip()
+
+APP_BASE_URL = os.getenv('APP_BASE_URL', 'http://localhost:5000').strip()
 
 # Enable CORS
 CORS(app, origins='*')
@@ -251,6 +265,62 @@ def require_role(required_role):
         return decorated
     return decorator
 
+def find_or_create_sso_user(email, display_name):
+    """
+    Look up a user by email, or create one for SSO users.
+    SSO users are created as Service Engineers by default.
+    """
+    if not email:
+        # We require an email for SSO users to map identities
+        return None
+
+    conn = get_db_connection()
+    try:
+        existing = conn.execute(
+            'SELECT * FROM users WHERE email = ?', (email.lower(),)
+        ).fetchone()
+
+        if existing:
+            return existing
+
+        # Create a new SSO-backed user
+        user_id = str(uuid.uuid4())
+        username = email.split('@')[0]
+
+        # Ensure username is unique
+        suffix = 1
+        base_username = username
+        while conn.execute(
+            'SELECT 1 FROM users WHERE username = ?', (username,)
+        ).fetchone():
+            suffix += 1
+            username = f"{base_username}{suffix}"
+
+        # We don't use the password for SSO users, but the column is NOT NULL.
+        random_password = uuid.uuid4().hex
+        password_hash = bcrypt.hashpw(random_password.encode('utf-8'), bcrypt.gensalt())
+
+        role = 'Service Engineer'
+        avatar = generate_avatar(display_name or username)
+
+        conn.execute(
+            '''
+            INSERT INTO users (id, username, display_name, email, password_hash, role, avatar_data)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (user_id, username, display_name or username, email.lower(),
+             password_hash.decode('utf-8'), role, avatar)
+        )
+        conn.commit()
+
+        user = conn.execute(
+            'SELECT * FROM users WHERE id = ?', (user_id,)
+        ).fetchone()
+
+        return user
+    finally:
+        conn.close()
+
 # Health check endpoint
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -381,6 +451,110 @@ def login():
         
     except Exception as e:
         return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/api/auth/sso/settings', methods=['GET'])
+def get_sso_settings():
+    """Expose basic SSO configuration details to the frontend (read-only)."""
+    enabled = bool(AZURE_TENANT_ID and AZURE_CLIENT_ID and AZURE_REDIRECT_URI)
+    return jsonify({
+        'enabled': enabled,
+        'platform': AZURE_PLATFORM,
+        'redirect_uri': AZURE_REDIRECT_URI,
+        'require_client_secret': AZURE_REQUIRE_CLIENT_SECRET
+    })
+
+@app.route('/api/auth/sso/login', methods=['GET'])
+def sso_login():
+    """
+    Start Azure OAuth SSO login by redirecting to the Azure authorization endpoint.
+    Backend uses a Web-style authorization_code flow.
+    """
+    if not (AZURE_TENANT_ID and AZURE_CLIENT_ID and AZURE_REDIRECT_URI):
+        return jsonify({'error': 'SSO is not configured'}), 503
+
+    authorize_url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/authorize"
+    scope = 'openid profile email User.Read'
+
+    params = {
+        'client_id': AZURE_CLIENT_ID,
+        'response_type': 'code',
+        'redirect_uri': AZURE_REDIRECT_URI,
+        'response_mode': 'query',
+        'scope': scope,
+    }
+
+    # Build query string
+    from urllib.parse import urlencode
+    query_string = urlencode(params)
+    return redirect(f"{authorize_url}?{query_string}")
+
+@app.route('/api/auth/sso/callback', methods=['GET'])
+def sso_callback():
+    """
+    Azure redirects back here with an authorization code.
+    Exchange it for tokens, map/create a local user, and then
+    redirect to the SPA with an application JWT in the URL.
+    """
+    error = request.args.get('error')
+    if error:
+        error_description = request.args.get('error_description', 'SSO login failed')
+        return jsonify({'error': error_description}), 400
+
+    code = request.args.get('code')
+    if not code:
+        return jsonify({'error': 'Missing authorization code'}), 400
+
+    token_url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
+    data = {
+        'client_id': AZURE_CLIENT_ID,
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': AZURE_REDIRECT_URI,
+        'scope': 'openid profile email User.Read',
+    }
+
+    if AZURE_REQUIRE_CLIENT_SECRET:
+        data['client_secret'] = AZURE_CLIENT_SECRET
+
+    try:
+        token_response = requests.post(token_url, data=data, timeout=15)
+        if token_response.status_code != 200:
+            return jsonify({'error': 'Failed to exchange code for tokens'}), 400
+
+        token_data = token_response.json()
+        id_token = token_data.get('id_token')
+
+        if not id_token:
+            return jsonify({'error': 'No id_token returned from Azure'}), 400
+
+        # Decode the id_token without verifying the signature.
+        # For production, you should validate the token against Azure AD keys.
+        try:
+            azure_claims = jwt.decode(id_token, options={"verify_signature": False, "verify_aud": False})
+        except Exception:
+            return jsonify({'error': 'Failed to decode id_token'}), 400
+
+        email = azure_claims.get('preferred_username') or azure_claims.get('email')
+        display_name = azure_claims.get('name') or (email.split('@')[0] if email else None)
+
+        user = find_or_create_sso_user(email, display_name)
+        if not user:
+            return jsonify({'error': 'Unable to create or find SSO user'}), 400
+
+        # Generate our own application JWT token
+        token = jwt.encode({
+            'id': user['id'],
+            'username': user['username'],
+            'role': user['role'],
+            'exp': datetime.utcnow() + timedelta(days=7)
+        }, app.config['SECRET_KEY'], algorithm='HS256')
+
+        # Redirect back to the SPA with the token in the query string
+        redirect_url = f"{APP_BASE_URL}?ssoToken={token}"
+        return redirect(redirect_url)
+
+    except Exception:
+        return jsonify({'error': 'SSO callback processing failed'}), 500
 
 @app.route('/api/auth/profile', methods=['GET'])
 @token_required

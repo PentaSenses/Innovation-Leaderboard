@@ -107,6 +107,8 @@ const themeToggle = document.getElementById('themeToggle');
 const dashboardLink = document.querySelector('[data-page="dashboard"]');
 const userName = document.getElementById('userName');
 const logoutBtn = document.getElementById('logoutBtn');
+const azureSsoBtn = document.getElementById('azureSsoBtn');
+const ssoConfigHint = document.getElementById('ssoConfigHint');
 
 // Initialize app
 document.addEventListener('DOMContentLoaded', function() {
@@ -120,7 +122,22 @@ function initializeApp() {
     const savedTheme = localStorage.getItem('theme') || 'dark';
     document.documentElement.setAttribute('data-theme', savedTheme);
     themeToggle.textContent = savedTheme === 'light' ? '🌙' : '☀️';
-    
+
+    // Check for SSO token in URL (after Azure redirect)
+    try {
+        const url = new URL(window.location.href);
+        const ssoToken = url.searchParams.get('ssoToken');
+        if (ssoToken) {
+            authToken = ssoToken;
+            localStorage.setItem('authToken', authToken);
+            // Clean the URL so the token isn't left in the address bar
+            url.searchParams.delete('ssoToken');
+            window.history.replaceState({}, document.title, url.toString());
+        }
+    } catch (e) {
+        console.error('Failed to parse SSO token from URL', e);
+    }
+
     // Check for stored auth token
     const storedToken = localStorage.getItem('authToken');
     const storedUser = localStorage.getItem('currentUser');
@@ -135,6 +152,9 @@ function initializeApp() {
         showPage('home');
         loadHomePageData();
     }
+
+    // Initialize SSO configuration hint (optional)
+    initializeSsoConfig();
 }
 
 function setupEventListeners() {
@@ -158,6 +178,14 @@ function setupEventListeners() {
     authBtn.addEventListener('click', () => {
         showModal('authModal');
     });
+
+    // Azure SSO button
+    if (azureSsoBtn) {
+        azureSsoBtn.addEventListener('click', () => {
+            // Start SSO login – backend will redirect to Azure
+            window.location.href = '/api/auth/sso/login';
+        });
+    }
 
     // Theme toggle
     themeToggle.addEventListener('click', toggleTheme);
@@ -191,6 +219,37 @@ function setupEventListeners() {
     
     // Form events
     setupFormEvents();
+}
+
+async function initializeSsoConfig() {
+    if (!ssoConfigHint) return;
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/auth/sso/settings`);
+        if (!response.ok) {
+            // Hide hint if SSO is not configured
+            ssoConfigHint.style.display = 'none';
+            return;
+        }
+
+        const data = await response.json();
+        if (!data.enabled) {
+            ssoConfigHint.style.display = 'none';
+            return;
+        }
+
+        const platform = data.platform || 'Web';
+        const redirectUri = data.redirect_uri || '';
+        const requiresSecret = data.require_client_secret ? 'Yes' : 'No';
+
+        ssoConfigHint.textContent = `SSO enabled via Azure OAuth SSO. Platform: ${platform}. Redirect URI: ${redirectUri}. Requires Client Secret: ${requiresSecret}.`;
+        ssoConfigHint.style.display = 'block';
+    } catch (error) {
+        console.error('Failed to load SSO settings:', error);
+        if (ssoConfigHint) {
+            ssoConfigHint.style.display = 'none';
+        }
+    }
 }
 
 function setupModalEvents() {
